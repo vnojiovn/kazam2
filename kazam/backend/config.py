@@ -76,7 +76,8 @@ class KazamConfig(object):
                          "yt_stream":              "",
                          "yt_server":              "",
                          "broadcast_dst":          "1",
-                         "tw_server":              "rtmp://live.twitch.tv/app/"
+                         "tw_server":              "rtmp://live.twitch.tv/app/",
+                         "restore_token":          ""
                          },
                 },
                 {"name": "keyboard_shortcuts",
