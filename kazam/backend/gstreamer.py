@@ -52,6 +52,40 @@ else:
     Gst.debug_set_active(False)
 
 
+def pipewiresrc_available():
+    """True when the pipewiresrc element (gstreamer1.0-pipewire) is installed."""
+    return Gst.ElementFactory.find("pipewiresrc") is not None
+
+
+def region_to_crop(region, stream_w, stream_h):
+    """Convert a (x, y, w, h) region into videocrop left/top/right/bottom pixels."""
+    x, y, w, h = region
+    return {
+        "left": max(0, x),
+        "top": max(0, y),
+        "right": max(0, stream_w - (x + w)),
+        "bottom": max(0, stream_h - (y + h)),
+    }
+
+
+def make_pipewire_source(fd, node_id):
+    """Create a configured pipewiresrc element for a portal stream."""
+    src = Gst.ElementFactory.make("pipewiresrc", "video_src")
+    src.set_property("fd", int(fd))
+    src.set_property("path", str(node_id))
+    # Window/region streams stop emitting buffers when the captured surface is
+    # static (e.g. while the user moves the pointer away to press "finish").
+    # Without keepalive the capture loop blocks waiting for the next frame and
+    # can never process the EOS sent at stop, so the muxer hangs and the file is
+    # never finalised. keepalive-time resends the last buffer on a timer so the
+    # loop stays responsive; resend-last guarantees a final frame on EOS.
+    if "keepalive-time" in [p.name for p in src.list_properties()]:
+        src.set_property("keepalive-time", 1000)
+    if "resend-last" in [p.name for p in src.list_properties()]:
+        src.set_property("resend-last", True)
+    return src
+
+
 class Screencast(GObject.GObject):
     __gsignals__ = {"flush-done": (GObject.SIGNAL_RUN_LAST,
                                    None,
@@ -66,6 +100,10 @@ class Screencast(GObject.GObject):
         self.pipeline = Gst.Pipeline()
         self.area = None
         self.xid = None
+        self.pw_fd = None
+        self.pw_node_id = None
+        self.pw_region = None
+        self.pw_stream_size = None
         self.crop_vid = False
         self.mode = mode
 
@@ -76,13 +114,22 @@ class Screencast(GObject.GObject):
                       area,
                       xid,
                       audio_channels,
-                      audio2_channels):
+                      audio2_channels,
+                      pw_fd=None,
+                      pw_node_id=None,
+                      pw_region=None,
+                      pw_stream_size=None):
 
         # Get the number of cores available then use all except one for encoding
         self.cores = multiprocessing.cpu_count()
 
         if self.cores > 1:
             self.cores -= 1
+
+        self.pw_fd = pw_fd
+        self.pw_node_id = pw_node_id
+        self.pw_region = pw_region  # (x, y, w, h) within the stream, or None
+        self.pw_stream_size = pw_stream_size  # (width, height) of the portal stream, or None
 
         self.audio_source = audio_source
         self.audio_channels = audio_channels
@@ -105,7 +152,7 @@ class Screencast(GObject.GObject):
 
         logger.debug("Framerate : {0}".format(prefs.framerate))
 
-        if self.video_source or self.area:
+        if self.video_source or self.area or self.pw_node_id is not None:
             ret = self.setup_video_source()
             if not ret:
                 return False
@@ -134,52 +181,63 @@ class Screencast(GObject.GObject):
         if prefs.test:
             self.video_src = Gst.ElementFactory.make("videotestsrc", "video_src")
             self.video_src.set_property("pattern", "smpte")
+        elif self.pw_node_id is not None:
+            if not pipewiresrc_available():
+                show_popup("Wayland screen capture needs the 'gstreamer1.0-pipewire' "
+                           "package. Please install it and try again.",
+                           title="Kazam: missing dependency")
+                return False
+            self.video_src = make_pipewire_source(self.pw_fd, self.pw_node_id)
+            logger.debug("pipewiresrc selected as video source (node %s).",
+                         self.pw_node_id)
         elif self.mode in [MODE_SCREENSHOT, MODE_SCREENCAST, MODE_BROADCAST]:
             self.video_src = Gst.ElementFactory.make("ximagesrc", "video_src")
             logger.debug("ximagesrc selected as video source.")
         elif self.mode == MODE_WEBCAM:
             self.video_src = Gst.ElementFactory.make("v4l2src", "video_src")
 
-        if self.area:
-            logger.debug("Capturing area.")
-            startx = self.area[0] if self.area[0] > 0 else 0
-            starty = self.area[1] if self.area[1] > 0 else 0
-            endx = self.area[2]
-            endy = self.area[3]
-        else:
-            if self.mode != MODE_WEBCAM:
-                startx = self.video_source['x']
-                starty = self.video_source['y']
-                width = self.video_source['width']
-                height = self.video_source['height']
-                endx = startx + width - 1
-                endy = starty + height - 1
+        if self.pw_node_id is None:
+            # X11 coordinate computation — not used by pipewiresrc.
+            if self.area:
+                logger.debug("Capturing area.")
+                startx = self.area[0] if self.area[0] > 0 else 0
+                starty = self.area[1] if self.area[1] > 0 else 0
+                endx = self.area[2]
+                endy = self.area[3]
             else:
-                startx = 0
-                starty = 0
-                width = CAM_RESOLUTIONS[prefs.webcam_resolution][0]
-                height = CAM_RESOLUTIONS[prefs.webcam_resolution][1]
-                endx = CAM_RESOLUTIONS[prefs.webcam_resolution][0] - 1
-                endy = CAM_RESOLUTIONS[prefs.webcam_resolution][1] - 1
-        if isinstance(self.video_source, dict) and 'scale' in self.video_source:
-            scale = self.video_source['scale']
-        else:
-            scale = 1
-        startx = int(startx * scale)
-        starty = int(starty * scale)
-        endx = int(endx * scale)
-        endy = int(endy * scale)
-        #
-        # H264 requirement is that video dimensions are divisible by 2.
-        # If they are not, we have to get rid of that extra pixel.
-        #
-        if not abs(startx - endx) % 2 and prefs.codec == CODEC_H264:
-            endx -= 1
+                if self.mode != MODE_WEBCAM:
+                    startx = self.video_source['x']
+                    starty = self.video_source['y']
+                    width = self.video_source['width']
+                    height = self.video_source['height']
+                    endx = startx + width - 1
+                    endy = starty + height - 1
+                else:
+                    startx = 0
+                    starty = 0
+                    width = CAM_RESOLUTIONS[prefs.webcam_resolution][0]
+                    height = CAM_RESOLUTIONS[prefs.webcam_resolution][1]
+                    endx = CAM_RESOLUTIONS[prefs.webcam_resolution][0] - 1
+                    endy = CAM_RESOLUTIONS[prefs.webcam_resolution][1] - 1
+            if isinstance(self.video_source, dict) and 'scale' in self.video_source:
+                scale = self.video_source['scale']
+            else:
+                scale = 1
+            startx = int(startx * scale)
+            starty = int(starty * scale)
+            endx = int(endx * scale)
+            endy = int(endy * scale)
+            #
+            # H264 requirement is that video dimensions are divisible by 2.
+            # If they are not, we have to get rid of that extra pixel.
+            #
+            if not abs(startx - endx) % 2 and prefs.codec == CODEC_H264:
+                endx -= 1
 
-        if not abs(starty - endy) % 2 and prefs.codec == CODEC_H264:
-            endy -= 1
+            if not abs(starty - endy) % 2 and prefs.codec == CODEC_H264:
+                endy -= 1
 
-        logger.debug("Coordinates SX: {0} SY: {1} EX: {2} EY: {3}".format(startx, starty, endx, endy))
+            logger.debug("Coordinates SX: {0} SY: {1} EX: {2} EY: {3}".format(startx, starty, endx, endy))
 
         if prefs.test:
             logger.info("Using test signal instead of screen capture.")
@@ -211,17 +269,43 @@ class Screencast(GObject.GObject):
                         if prefs.xid_geometry[3] % 2:
                             self.video_crop.set_property("bottom", 1)
                             self.crop_vid = True
+
+                    self.video_src.set_property("use-damage", False)
+                    self.video_src.set_property("show-pointer", prefs.capture_cursor)
+                    self.video_caps = Gst.caps_from_string("video/x-raw, framerate={}/1".format(int(prefs.framerate)))
+                    self.f_video_caps = Gst.ElementFactory.make("capsfilter", "vid_filter")
+                    self.f_video_caps.set_property("caps", self.video_caps)
+                elif self.pw_node_id is not None:
+                    # pipewiresrc has no startx/endx/use-damage/show-pointer;
+                    # cursor is handled by the portal cursor_mode.
+                    #
+                    # Do NOT pin a framerate (or memory feature) on the source:
+                    # pipewiresrc negotiates format/rate dynamically from the
+                    # compositor stream, so a fixed "framerate=N/1" fails with
+                    # not-negotiated. Request plain system-memory raw video and
+                    # let the downstream videorate (max-rate, set below) cap the
+                    # framerate instead.
+                    self.video_caps = Gst.caps_from_string("video/x-raw")
+                    self.f_video_caps = Gst.ElementFactory.make("capsfilter", "vid_filter")
+                    self.f_video_caps.set_property("caps", self.video_caps)
+                    if self.pw_region is not None and self.pw_stream_size is not None:
+                        self.video_crop = Gst.ElementFactory.make("videocrop", "cropper")
+                        crop = region_to_crop(self.pw_region, *self.pw_stream_size)
+                        for edge, px in crop.items():
+                            self.video_crop.set_property(edge, px)
+                        self.crop_vid = True
+                        logger.debug("Wayland region crop: %s", crop)
                 else:
                     self.video_src.set_property("startx", startx)
                     self.video_src.set_property("starty", starty)
                     self.video_src.set_property("endx", endx)
                     self.video_src.set_property("endy", endy)
 
-                self.video_src.set_property("use-damage", False)
-                self.video_src.set_property("show-pointer", prefs.capture_cursor)
-                self.video_caps = Gst.caps_from_string("video/x-raw, framerate={}/1".format(int(prefs.framerate)))
-                self.f_video_caps = Gst.ElementFactory.make("capsfilter", "vid_filter")
-                self.f_video_caps.set_property("caps", self.video_caps)
+                    self.video_src.set_property("use-damage", False)
+                    self.video_src.set_property("show-pointer", prefs.capture_cursor)
+                    self.video_caps = Gst.caps_from_string("video/x-raw, framerate={}/1".format(int(prefs.framerate)))
+                    self.f_video_caps = Gst.ElementFactory.make("capsfilter", "vid_filter")
+                    self.f_video_caps.set_property("caps", self.video_caps)
             elif self.mode == MODE_BROADCAST:
                 logger.debug("Setting up MODE_BROADCAST for video.")
                 if self.xid:  # xid was passed, so we have to capture a single window.
@@ -299,6 +383,16 @@ class Screencast(GObject.GObject):
 
         self.video_convert = Gst.ElementFactory.make("videoconvert", "videoconvert")
         self.video_rate = Gst.ElementFactory.make("videorate", "video_rate")
+
+        # pipewiresrc (Wayland) delivers a variable framerate (framerate=0/1).
+        # x264enc stalls and emits nothing on variable-rate input, so force a
+        # CONSTANT framerate downstream of videorate via this capsfilter (this is
+        # what actually makes videorate duplicate/drop frames to a fixed rate).
+        if self.pw_node_id is not None:
+            self.f_video_rate_caps = Gst.ElementFactory.make("capsfilter", "video_rate_caps")
+            self.f_video_rate_caps.set_property(
+                "caps", Gst.caps_from_string(
+                    "video/x-raw, framerate={}/1".format(int(prefs.framerate))))
 
         if self.mode is not MODE_BROADCAST:
             logger.debug("Codec: {}".format(CODEC_LIST[prefs.codec][2]))
@@ -494,6 +588,8 @@ class Screencast(GObject.GObject):
         if self.crop_vid and self.mode is not MODE_BROADCAST:
             self.pipeline.add(self.video_crop)
         self.pipeline.add(self.video_rate)
+        if self.pw_node_id is not None:
+            self.pipeline.add(self.f_video_rate_caps)
         self.pipeline.add(self.video_convert)
         self.pipeline.add(self.q_video_out)
         self.pipeline.add(self.final_queue)
@@ -588,8 +684,14 @@ class Screencast(GObject.GObject):
             else:
                 ret = self.q_video_src.link(self.video_rate)
                 logger.debug("Link q_video_src -> video_rate {}".format(ret))
-                ret = self.video_rate.link(self.video_convert)
-                logger.debug("Link video_rate -> video_convert: {}".format(ret))
+                if self.pw_node_id is not None:
+                    ret = self.video_rate.link(self.f_video_rate_caps)
+                    logger.debug("Link video_rate -> video_rate_caps: {}".format(ret))
+                    ret = self.f_video_rate_caps.link(self.video_convert)
+                    logger.debug("Link video_rate_caps -> video_convert: {}".format(ret))
+                else:
+                    ret = self.video_rate.link(self.video_convert)
+                    logger.debug("Link video_rate -> video_convert: {}".format(ret))
 
         if prefs.codec is CODEC_RAW and self.mode is not MODE_BROADCAST:
             self.video_convert.link(self.q_video_out)
@@ -739,7 +841,13 @@ class Screencast(GObject.GObject):
     def on_error(self, bus, message):
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            if self.last_err_msg != err.message:
+            # Errors from pipewiresrc (Wayland) are not worth a scary modal:
+            # they are either a recoverable startup re-negotiation or the portal
+            # stream being torn down when the recording stops or the user clicks
+            # GNOME's "stop sharing" indicator. Log them but do not interrupt.
+            from_pipewire = (self.pw_node_id is not None and
+                             message.src is getattr(self, "video_src", None))
+            if not from_pipewire and self.last_err_msg != err.message:
                 error_message = f"Error: {err.message}"
                 if debug:
                     error_message += f"\nDebug info: {debug}"
