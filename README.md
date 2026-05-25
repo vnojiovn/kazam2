@@ -46,12 +46,22 @@ In Ubuntu, make sure the PulseAudio GStreamer plugin is installed. If not, run:
 sudo apt reinstall gstreamer1.0-pulseaudio -y
 ```
 
+For **Wayland support**, install the PipeWire GStreamer plugin:
+
+```bash
+sudo apt install gstreamer1.0-pipewire -y
+```
+
 - To use OCR features, please install:
 
 ```bash
 sudo apt-get install tesseract-ocr -y
 pip install pytesseract pillow rapidocr-onnxruntime
 ```
+
+## 🌊 Wayland Support
+
+Kazam automatically detects and uses Wayland screen capture when running in a Wayland session. It leverages the xdg-desktop-portal ScreenCast interface and GStreamer's `pipewiresrc` element to capture video, replacing the X11-only `ximagesrc` used on X11 sessions. On the first recording, the system screen-sharing dialog appears where you select what to capture (whole screen, a window, or a region). This permission is remembered for future recordings. Full-screen, window, and area capture modes are all supported. Requires the `gstreamer1.0-pipewire` package (see Installation section above).
 
 ## 🧸 Screenshots
 

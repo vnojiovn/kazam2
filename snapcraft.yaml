@@ -16,6 +16,7 @@ parts:
       - gir1.2-gudev-1.0
       - gir1.2-keybinder-3.0
       - gnome-session-canberra # canberra-gtk-play
+      - gstreamer1.0-pipewire
     python-packages:
       - kazam
     override-prime: |
