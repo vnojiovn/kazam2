@@ -9,9 +9,8 @@ import os
 
 here = os.path.dirname(os.path.realpath(__file__))
 
-from distutils.core import setup
+from setuptools import setup
 from DistUtilsExtra.command import build_extra, build_i18n, build_help, build_icons
-import hiq
 
 import re
 import glob
@@ -73,7 +72,6 @@ setup(name='kazam',
                 'kazam.pulseaudio',
                 'kazam.backend',
                 'kazam.frontend',
-                'kazam.data',
                 ],
       data_files=[('share/kazam/ui/', glob.glob('data/ui/*ui')),
                   ('share/kazam/sounds/', glob.glob('data/sounds/*ogg')),
