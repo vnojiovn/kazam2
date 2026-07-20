@@ -35,10 +35,17 @@ data_files = [('share/kazam/ui/', glob.glob('data/ui/*ui')),
               ('share/icons/gnome/scalable/apps/', glob.glob('data/icons/scalable/*svg')),
               ]
 
-if not HAVE_DISTUTILS_EXTRA:
-    # build_i18n normally merges data/kazam.desktop.in into a localized
-    # .desktop file; install the pre-generated one instead.
+if HAVE_DISTUTILS_EXTRA:
+    # The original project carried this in setup.cfg (dropped by the fork):
+    # build_i18n merges data/kazam.desktop.in with the translations in po/.
+    OPTIONS = {'build_i18n': {
+        'domain': 'kazam',
+        'desktop_files': '[("share/applications", ("data/kazam.desktop.in",))]',
+    }}
+else:
+    # Without build_i18n, install the pre-generated .desktop file instead.
     data_files.append(('share/applications/', ['data/kazam.desktop']))
+    OPTIONS = {}
 
 setup(name='kazam',
       version=VERSION,
@@ -78,5 +85,6 @@ setup(name='kazam',
                 'kazam.frontend',
                 ],
       data_files=data_files,
+      options=OPTIONS,
       cmdclass=CMDCLASS,
       )
