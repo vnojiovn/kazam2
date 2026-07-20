@@ -77,11 +77,6 @@ except ImportError:
     logger.critical(_("Gstreamer 1.0 or higher required, bailing out."))
     sys.exit(0)
 
-from kazam import __file__ as kazam_dir
-
-icons_dir = os.path.join(os.path.dirname(kazam_dir), 'data/icons/scalable')
-print(icons_dir)
-
 class KazamApp(GObject.GObject):
 
     def __init__(self, datadir, dist, debug, test, sound, silent):
@@ -109,7 +104,12 @@ class KazamApp(GObject.GObject):
                 prefs.sound = False
 
         self.icons = Gtk.IconTheme.get_default()
-        self.icons.append_search_path(icons_dir)
+        # Make the bundled icons visible for installs outside the system
+        # prefix (pip/venv): they live next to datadir under share/icons.
+        icons_dir = os.path.abspath(os.path.join(prefs.datadir, "..", "icons",
+                                                 "gnome", "scalable", "apps"))
+        if os.path.isdir(icons_dir):
+            self.icons.append_search_path(icons_dir)
 
         self.default_cursor = Gdk.Cursor(Gdk.CursorType.LEFT_PTR)
 
