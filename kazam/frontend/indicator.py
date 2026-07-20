@@ -149,8 +149,18 @@ class KazamSuperIndicator(GObject.GObject):
     def on_menuitem_quit_activate(self, menuitem):
         self.emit("indicator-quit-request")
 
+#
+# Compatibility shim: Ubuntu 24.04+ ships the Ayatana fork of AppIndicator3.
+# Prefer it, fall back to the legacy AppIndicator3, then to Gtk.StatusIcon.
+#
 try:
-    from gi.repository import AppIndicator3
+    import gi
+    try:
+        gi.require_version('AyatanaAppIndicator3', '0.1')
+        from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+    except (ValueError, ImportError):
+        gi.require_version('AppIndicator3', '0.1')
+        from gi.repository import AppIndicator3
 
     class KazamIndicator(KazamSuperIndicator):
 
@@ -225,7 +235,7 @@ try:
             if not self.silent:
                 self.indicator.set_status(AppIndicator3.IndicatorStatus.ATTENTION)
 
-except ImportError:
+except (ValueError, ImportError):
     #
     # AppIndicator failed to import, not running Ubuntu?
     # Fallback to Gtk.StatusIcon.
