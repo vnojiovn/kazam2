@@ -53,6 +53,9 @@ from kazam.frontend.window_outline import OutlineWindow
 from kazam.frontend.window_countdown import CountdownWindow
 from kazam.frontend.window_keypress import KeypressWindow
 
+from kazam.backend.session import is_wayland
+from kazam.backend.portal import PortalScreenCast, SourceType
+
 logger = logging.getLogger("Main")
 
 #
@@ -513,10 +516,11 @@ class KazamApp(GObject.GObject):
 
         if widget.get_name() == "MODE_AREA" and widget.get_active():
             logger.debug("Area ON.")
-            self.area_window = AreaWindow()
-            self.tmp_sig1 = self.area_window.connect("area-selected", self.cb_area_selected)
-            self.tmp_sig2 = self.area_window.connect("area-canceled", self.cb_area_canceled)
             self.record_mode = MODE_AREA
+            if not is_wayland():
+                self.area_window = AreaWindow()
+                self.tmp_sig1 = self.area_window.connect("area-selected", self.cb_area_selected)
+                self.tmp_sig2 = self.area_window.connect("area-canceled", self.cb_area_canceled)
 
         if widget.get_name() == "MODE_AREA" and not widget.get_active():
             logger.debug("Area OFF.")
@@ -536,11 +540,12 @@ class KazamApp(GObject.GObject):
 
         if widget.get_name() == "MODE_WIN" and widget.get_active():
             logger.debug("Window capture ON.")
-            self.select_window = SelectWindow()
-            self.tmp_sig3 = self.select_window.connect("window-selected", self.cb_window_selected)
-            self.tmp_sig4 = self.select_window.connect("window-canceled", self.cb_window_canceled)
             self.record_mode = MODE_WIN
             self.chk_borders_pic.set_sensitive(True)
+            if not is_wayland():
+                self.select_window = SelectWindow()
+                self.tmp_sig3 = self.select_window.connect("window-selected", self.cb_window_selected)
+                self.tmp_sig4 = self.select_window.connect("window-canceled", self.cb_window_canceled)
 
         if widget.get_name() == "MODE_WIN" and not widget.get_active():
             logger.debug("Window capture OFF.")
@@ -844,6 +849,9 @@ class KazamApp(GObject.GObject):
             logger.debug("Waiting for data to flush.")
 
     def cb_flush_done(self, widget):
+        # Release the portal ScreenCast session now that recording has finished,
+        # otherwise GNOME keeps showing its "screen is being shared" indicator.
+        self._close_portal()
         if self.main_mode == MODE_SCREENCAST and prefs.autosave_video:
             logger.debug("Autosaving enabled.")
             fname = get_next_filename(prefs.autosave_video_dir,
@@ -1102,6 +1110,11 @@ class KazamApp(GObject.GObject):
         else:
             video_source = HW.screens[screen]
 
+        if is_wayland() and self.main_mode == MODE_SCREENCAST:
+            self._start_wayland_capture(video_source, audio_source, audio2_source,
+                                        audio_channels, audio2_channels)
+            return
+
         if self.main_mode in [MODE_SCREENCAST, MODE_WEBCAM, MODE_BROADCAST]:
             self.recorder = Screencast(self.main_mode)
             ret = self.recorder.setup_sources(video_source,
@@ -1131,6 +1144,116 @@ class KazamApp(GObject.GObject):
                                        prefs.xid if self.record_mode == MODE_WIN else None)
             self.grabber.connect("flush-done", self.cb_flush_done)
 
+        self._begin_countdown_and_record()
+
+    def _start_wayland_capture(self, video_source, audio_source, audio2_source,
+                               audio_channels, audio2_channels):
+        self._pending_audio = (audio_source, audio2_source,
+                               audio_channels, audio2_channels)
+        self._wl_region = None            # (x, y, w, h) in screenshot pixels
+        self._wl_overlay_size = None      # screenshot size, for scaling
+        self._shot_path = None
+        if self.record_mode == MODE_AREA:
+            # Grab a still screenshot first and let the user draw the region on
+            # it (a screen-covering Wayland window can't be transparent, so we
+            # can't dim the live desktop). The capture portal is opened only
+            # afterwards so its PipeWire stream is fresh at record time.
+            from kazam.backend.portal import PortalScreenshot
+            self._shot = PortalScreenshot()
+            self._shot.connect("ready", self._on_screenshot_ready)
+            self._shot.connect("failed", self._on_portal_failed)
+            self._shot.connect("cancelled", lambda o: self._reset_after_portal())
+            self._shot.run()
+            return
+        self._open_portal()
+
+    def _on_screenshot_ready(self, shot, path):
+        self._shot_path = path
+        from kazam.frontend.window_area_wl import AreaWindowWL
+        self._area_wl = AreaWindowWL(path)
+        self._area_wl.connect("area-selected", self._on_wl_area_selected)
+        self._area_wl.connect("area-cancelled",
+                              lambda o: self._cleanup_shot_and_reset())
+
+    def _on_wl_area_selected(self, obj, x, y, w, h):
+        self._wl_region = (x, y, w, h)
+        self._wl_overlay_size = (self._area_wl.screen_w, self._area_wl.screen_h)
+        self._area_wl = None
+        self._cleanup_shot()
+        self._open_portal()
+
+    def _cleanup_shot(self):
+        if self._shot_path:
+            try:
+                import os
+                os.remove(self._shot_path)
+            except OSError:
+                pass
+            self._shot_path = None
+
+    def _cleanup_shot_and_reset(self):
+        self._cleanup_shot()
+        self._reset_after_portal()
+
+    def _open_portal(self):
+        types = SourceType.WINDOW if self.record_mode == MODE_WIN else SourceType.MONITOR
+        token = prefs.config.get("main", "restore_token") or None
+        self._portal = PortalScreenCast(types, prefs.capture_cursor, token)
+        self._portal.connect("ready", self._on_portal_ready)
+        self._portal.connect("failed", self._on_portal_failed)
+        self._portal.connect("cancelled", self._on_portal_cancelled)
+        self._portal.connect("closed", self._on_portal_session_closed)
+        self._portal.run()
+
+    def _on_portal_session_closed(self, portal):
+        # GNOME's "stop sharing" indicator (or any external session end) closes
+        # the portal session. If we are recording, finalise exactly as if the
+        # user pressed Finish: drive the indicator's own finish handler so its
+        # icon/menu reset, which also emits indicator-stop-request -> stop.
+        if self.recording and self.indicator.recording:
+            logger.debug("Portal session closed externally; finishing recording.")
+            self.indicator.on_menuitem_finish_activate(None)
+
+    def _on_portal_ready(self, portal, fd, streams):
+        prefs.config.set("main", "restore_token", portal.restore_token or "")
+        prefs.config.write()
+        stream = streams[0]
+        self._portal_fd = fd
+        self._portal_stream = stream
+        region = None
+        stream_size = None
+        if self._wl_region is not None:
+            # The region is already in screenshot pixels, which are PHYSICAL and
+            # match the frames pipewiresrc actually delivers (e.g. 3200x2000).
+            # The portal reports stream["width"]/["height"] in LOGICAL pixels
+            # (e.g. 1600x1000), so we must NOT use them for the crop — videocrop
+            # operates on the real physical buffers. Crop against the screenshot
+            # size instead.
+            region = self._wl_region
+            stream_size = self._wl_overlay_size
+        audio_source, audio2_source, audio_channels, audio2_channels = self._pending_audio
+        self.recorder = Screencast(self.main_mode)
+        ret = self.recorder.setup_sources(
+            None, audio_source, audio2_source, None, None,
+            audio_channels, audio2_channels,
+            pw_fd=fd, pw_node_id=stream["node_id"],
+            pw_region=region, pw_stream_size=stream_size)
+        if not ret:
+            return
+        self.recorder.connect("flush-done", self.cb_flush_done)
+        self.indicator.recording = True
+        self.indicator.menuitem_start.set_sensitive(False)
+        self._begin_countdown_and_record()
+
+    def _on_portal_failed(self, portal, message):
+        from kazam.backend.utils import show_popup
+        show_popup(message, title="Kazam: screen capture failed")
+        self._reset_after_portal()
+
+    def _on_portal_cancelled(self, portal):
+        self._reset_after_portal()
+
+    def _begin_countdown_and_record(self):
         self.indicator.recording = True
         self.indicator.menuitem_start.set_sensitive(False)
         self.indicator.menuitem_pause.set_sensitive(False)
@@ -1138,9 +1261,7 @@ class KazamApp(GObject.GObject):
         self.indicator.menuitem_quit.set_sensitive(False)
         self.indicator.menuitem_finish.set_label(_("Cancel countdown"))
         self.in_countdown = True
-
         self.indicator.blink_set_state(BLINK_START)
-
         self.countdown = CountdownWindow(self.indicator, show_window=prefs.countdown_splash)
         self.countdown.connect("counter-finished", self.cb_counter_finished)
         logger.debug("Starting counter.")
@@ -1148,7 +1269,9 @@ class KazamApp(GObject.GObject):
         self.recording = True
         logger.debug("Hiding main window.")
         self.window.hide()
-        if self.main_mode == MODE_SCREENCAST or self.main_mode == MODE_SCREENSHOT or self.main_mode == MODE_OCR:
+        if not is_wayland() and (self.main_mode == MODE_SCREENCAST or
+                                 self.main_mode == MODE_SCREENSHOT or
+                                 self.main_mode == MODE_OCR):
             try:
                 if self.record_mode == MODE_AREA and prefs.area:
                     logger.debug("Showing recording outline.")
@@ -1170,6 +1293,17 @@ class KazamApp(GObject.GObject):
                         self.track_target_window(self.select_window.xid)
             except Exception as e:
                 logger.debug(f"Unable to show recording outline. Error: {str(e)}")
+
+    def _close_portal(self):
+        portal = getattr(self, "_portal", None)
+        if portal is not None:
+            portal.close()
+            self._portal = None
+
+    def _reset_after_portal(self):
+        self.indicator.recording = False
+        self.indicator.menuitem_start.set_sensitive(True)
+        self._close_portal()
 
     def track_target_window(self, xid):
         screen = Wnck.Screen.get_default()

@@ -1,3 +1,8 @@
+Unreleased
+----------
+
+- Added Wayland screen capture via xdg-desktop-portal ScreenCast and PipeWire (pipewiresrc). Supports monitor, window, and region modes with screen-share permission remembered between runs. Requires gstreamer1.0-pipewire package.
+
 Kazam 1.5.3 - NX-72307
 
 - Rudimentary broadcasting to YouTube Live
