@@ -437,6 +437,8 @@ class hw:
 
 def detect_codecs():
     logger = logging.getLogger("Prefs-DC")
+    import gi
+    gi.require_version('Gst', '1.0')
     from gi.repository import Gst
 
     Gst.init(None)
