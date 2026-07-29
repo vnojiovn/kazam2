@@ -22,6 +22,7 @@
 
 import cairo
 import math
+import time
 import logging
 logger = logging.getLogger("Window Select")
 

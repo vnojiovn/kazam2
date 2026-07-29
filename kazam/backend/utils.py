@@ -40,8 +40,8 @@ def is_xdotool_installed():
     try:
         subprocess.run(["xdotool", "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
-    except subprocess.CalledProcessError:
-        return False
-    except PermissionError:
+    except (subprocess.CalledProcessError, OSError):
+        # OSError covers FileNotFoundError (xdotool not installed) and
+        # PermissionError, both of which used to crash the recorder setup.
         return False
 

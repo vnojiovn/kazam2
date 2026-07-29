@@ -44,7 +44,8 @@ from kazam.frontend.window_webcam import WebcamWindow
 from kazam.backend.prefs import *
 from kazam.backend.utils import is_xdotool_installed, show_popup
 
-GObject.threads_init()
+# GObject.threads_init() has been a deprecated no-op since PyGObject 3.11
+# and is not needed on any supported Python; threads are always initialized.
 Gst.init(None)
 if prefs.debug:
     Gst.debug_set_active(True)

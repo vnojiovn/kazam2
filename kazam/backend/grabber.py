@@ -75,7 +75,11 @@ class Grabber(GObject.GObject, NeoOCR):
         #
         if prefs.shutter_sound and (not self.god):
             soundfile = os.path.join(prefs.datadir, 'sounds', prefs.sound_files[prefs.shutter_type])
-            subprocess.call(['canberra-gtk-play', '-f', soundfile])
+            try:
+                subprocess.call(['canberra-gtk-play', '-f', soundfile])
+            except OSError:
+                # canberra-gtk-play missing must not break the screenshot.
+                logger.warning("canberra-gtk-play not found, shutter sound skipped.")
 
         if self.xid:
             if prefs.capture_borders_pic:
