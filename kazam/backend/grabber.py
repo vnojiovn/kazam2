@@ -156,7 +156,7 @@ class Grabber(GObject.GObject, NeoOCR):
 
     def save(self, filename):
         if self.pixbuf is not None:
-            self.pixbuf.savev(filename, "png", "", "")
+            self.pixbuf.savev(filename, "png", [""], [""])
 
     def save_capture(self, old_path):
         logger.debug("Saving screenshot.")
