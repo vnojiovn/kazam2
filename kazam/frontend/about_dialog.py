@@ -55,24 +55,60 @@ LICENSE = """
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-
 def AboutDialog(icons):
     dialog = Gtk.AboutDialog()
     dialog.set_program_name(_("Kazam") + " - \"" + CODENAME + "\"")
+
+    # Nội dung gốc của Kazam
     dialog.set_comments(_("Linux Screen Recorder, Broadcaster and OCR"))
+
     dialog.set_license(LICENSE)
     dialog.set_version(VERSION)
     dialog.set_copyright("Henry Fuheng Wu\nDavid Klasinc\nAndrew Higginson\n")
+
+    # Website gốc của Kazam
     dialog.set_website("https://github.com/henrywoo/kazam")
+
+    # Thông tin người đóng gói
+    user_box = Gtk.Box(
+        orientation=Gtk.Orientation.VERTICAL,
+        spacing=2
+    )
+    user_box.set_halign(Gtk.Align.CENTER)
+
+    user_info = Gtk.Label(
+        label="Tạo .deb trên Ubuntu 26.04 LTS\nVàng Văn Quyn"
+    )
+    user_info.set_justify(Gtk.Justification.CENTER)
+    user_info.set_halign(Gtk.Align.CENTER)
+
+    vnoj_link = Gtk.LinkButton.new_with_label(
+        "https://vnoj.io.vn",
+        "Website: https://vnoj.io.vn"
+    )
+    vnoj_link.set_halign(Gtk.Align.CENTER)
+
+    user_box.pack_start(user_info, False, False, 0)
+    user_box.pack_start(vnoj_link, False, False, 0)
+
+    dialog.get_content_area().pack_start(
+        user_box, False, False, 5
+    )
+
     dialog.set_authors(AUTHORS.split("\n"))
-    dialog.set_artists(ARTISTS.split("\n"))
     try:
-        icon = icons.load_icon("kazam", 96, Gtk.IconLookupFlags.GENERIC_FALLBACK)
+        icon = icons.load_icon(
+            "kazam",
+            96,
+            Gtk.IconLookupFlags.GENERIC_FALLBACK
+        )
         dialog.set_logo(icon)
     except:
         # Not important, we just don't get to show our lovely logo.. :)
         pass
+
     dialog.show_all()
     dialog.set_position(Gtk.WindowPosition.CENTER)
     dialog.run()
     dialog.hide()
+
